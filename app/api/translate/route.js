@@ -6,8 +6,8 @@ export async function POST(request) {
     const { text } = await request.json();
 
     const translate = new Translate({
-      projectId: "astute-catcher-439016-d5",
-      keyFilename: "AIzaSyAV1qrLcJKaPGyVmniV484KYzazLQlYrhU",
+      projectId: "",
+      keyFilename: "",
     });
 
     const [translation] = await translate.translate(text, {
