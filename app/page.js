@@ -1,5 +1,12 @@
 import Image from "next/image";
+import MangaTranslator from "@/sections/MangaTrasnlator";
 
 export default function Home() {
-  return <div>Hello Dunia</div>;
+  return (
+    <div>
+      <>
+        <MangaTranslator />
+      </>
+    </div>
+  );
 }
