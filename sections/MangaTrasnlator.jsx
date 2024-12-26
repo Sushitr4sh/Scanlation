@@ -1,168 +1,79 @@
 "use client";
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef } from "react";
 import { Upload } from "lucide-react";
-import { createWorker } from "tesseract.js";
 
 const MangaTranslator = () => {
   const [selectedImage, setSelectedImage] = useState(null);
   const [processedImage, setProcessedImage] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [detectedRegions, setDetectedRegions] = useState([]);
-  const [opencv, setOpencv] = useState(null);
+  const [error, setError] = useState(null);
   const canvasRef = useRef(null);
-  const [ocrWorker, setOcrWorker] = useState(null);
 
-  useEffect(() => {
-    // Initialize OpenCV
-    if (typeof window !== "undefined") {
-      const script = document.createElement("script");
-      script.src = "https://docs.opencv.org/4.8.0/opencv.js";
-      script.async = true;
-      script.onload = () => {
-        console.log("OpenCV.js loaded");
-        setOpencv(window.cv);
-      };
-      document.body.appendChild(script);
-    }
-
-    // Initialize Tesseract with improved Japanese settings
-    const initWorker = async () => {
-      try {
-        const worker = await createWorker();
-        await worker.loadLanguage("jpn+jpn_vert"); // Load both horizontal and vertical Japanese
-        await worker.initialize("jpn+jpn_vert");
-        // Set parameters for better Japanese recognition
-        await worker.setParameters({
-          preserve_interword_spaces: "1",
-          textord_tabfind_vertical_text: "1",
-          textord_tabfind_vertical_horizontal_mix: "1",
-        });
-        setOcrWorker(worker);
-      } catch (error) {
-        console.error("Error initializing OCR worker:", error);
-      }
-    };
-
-    initWorker();
-
-    return () => {
-      if (ocrWorker) {
-        ocrWorker.terminate();
-      }
-    };
-  }, []);
-
-  const detectTextRegions = async (imageElement) => {
-    if (!opencv) {
-      console.error("OpenCV not loaded");
-      return [];
-    }
-
+  const detectAndTranslateText = async (imageUrl) => {
     try {
-      console.log("Starting text detection...");
-      const src = opencv.imread(imageElement);
+      setError(null);
+      // First, detect text using Cloud Vision API
+      const visionResponse = await fetch("/api/detect-text", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ image: imageUrl }),
+      });
 
-      // Convert to grayscale
-      const gray = new opencv.Mat();
-      opencv.cvtColor(src, gray, opencv.COLOR_RGBA2GRAY);
+      const visionData = await visionResponse.json();
 
-      // Apply bilateral filter to preserve text edges while reducing noise
-      const filtered = new opencv.Mat();
-      opencv.bilateralFilter(gray, filtered, 9, 75, 75);
-
-      // Apply OTSU threshold with increased sensitivity
-      const thresh = new opencv.Mat();
-      opencv.threshold(
-        filtered,
-        thresh,
-        0,
-        255,
-        opencv.THRESH_OTSU | opencv.THRESH_BINARY_INV
-      );
-
-      // Create rectangular kernel optimized for Japanese text
-      const rectKernel = opencv.getStructuringElement(
-        opencv.MORPH_RECT,
-        new opencv.Size(5, 15) // Adjusted for typical Japanese character aspect ratio
-      );
-
-      // Apply dilation
-      const dilation = new opencv.Mat();
-      opencv.dilate(thresh, dilation, rectKernel, new opencv.Point(-1, -1), 1);
-
-      // Find contours
-      const contours = new opencv.MatVector();
-      const hierarchy = new opencv.Mat();
-      opencv.findContours(
-        dilation,
-        contours,
-        hierarchy,
-        opencv.RETR_EXTERNAL,
-        opencv.CHAIN_APPROX_SIMPLE
-      );
-
-      // Process contours
-      const regions = [];
-      const minArea = 200; // Minimum area to be considered text
-      const maxArea = src.rows * src.cols * 0.3; // Maximum area (30% of image)
-
-      for (let i = 0; i < contours.size(); ++i) {
-        const contour = contours.get(i);
-        const area = opencv.contourArea(contour);
-
-        if (area > minArea && area < maxArea) {
-          const rect = opencv.boundingRect(contour);
-          const aspectRatio = rect.width / rect.height;
-
-          // Adjust aspect ratio range for Japanese text (both vertical and horizontal)
-          if (
-            aspectRatio > 0.1 &&
-            aspectRatio < 10 &&
-            rect.width > 15 &&
-            rect.height > 15
-          ) {
-            // Expand region slightly to ensure full text capture
-            const padding = 5;
-            const x = Math.max(0, rect.x - padding);
-            const y = Math.max(0, rect.y - padding);
-            const width = Math.min(src.cols - x, rect.width + padding * 2);
-            const height = Math.min(src.rows - y, rect.height + padding * 2);
-
-            const roi = src.roi(new opencv.Rect(x, y, width, height));
-            const tempCanvas = document.createElement("canvas");
-            tempCanvas.width = width;
-            tempCanvas.height = height;
-            opencv.imshow(tempCanvas, roi);
-
-            regions.push({
-              x,
-              y,
-              width,
-              height,
-              canvas: tempCanvas,
-            });
-
-            roi.delete();
-          }
-        }
-        contour.delete();
+      if (!visionData.textAnnotations) {
+        throw new Error("No text detected in the image");
       }
 
-      // Cleanup
-      src.delete();
-      gray.delete();
-      filtered.delete();
-      thresh.delete();
-      dilation.delete();
-      rectKernel.delete();
-      contours.delete();
-      hierarchy.delete();
+      // Process detected text blocks
+      const textBlocks = visionData.textAnnotations.slice(1); // Skip the first entry which is the entire text
+      const regions = textBlocks.map((block) => {
+        const vertices = block.boundingPoly.vertices;
+        const x = Math.min(...vertices.map((v) => v.x));
+        const y = Math.min(...vertices.map((v) => v.y));
+        const width = Math.max(...vertices.map((v) => v.x)) - x;
+        const height = Math.max(...vertices.map((v) => v.y)) - y;
 
-      console.log("Detection completed. Found", regions.length, "regions");
-      return regions;
+        return {
+          x,
+          y,
+          width,
+          height,
+          text: block.description,
+        };
+      });
+
+      // Translate detected text using Cloud Translation API
+      const translations = await Promise.all(
+        regions.map(async (region) => {
+          const translateResponse = await fetch("/api/translate", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              text: region.text,
+              targetLanguage: "en",
+              sourceLanguage: "ja",
+            }),
+          });
+
+          const translateData = await translateResponse.json();
+          return {
+            ...region,
+            translatedText: translateData.translatedText,
+          };
+        })
+      );
+
+      return translations;
     } catch (error) {
-      console.error("Error detecting text regions:", error);
-      return [];
+      console.error("Error in text detection and translation:", error);
+      setError(error.message);
+      throw error;
     }
   };
 
@@ -173,10 +84,8 @@ const MangaTranslator = () => {
       reader.onload = (e) => {
         setSelectedImage(e.target.result);
         const img = new Image();
-        img.onload = async () => {
-          const regions = await detectTextRegions(img);
-          setDetectedRegions(regions);
-          drawDetectedRegions(img, regions);
+        img.onload = () => {
+          drawOriginalImage(img);
         };
         img.src = e.target.result;
       };
@@ -184,55 +93,34 @@ const MangaTranslator = () => {
     }
   };
 
-  const drawDetectedRegions = (img, regions) => {
+  const drawOriginalImage = (img) => {
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
 
     canvas.width = img.width;
     canvas.height = img.height;
-
-    // Draw original image
     ctx.drawImage(img, 0, 0);
-
-    // Draw detected regions
-    ctx.strokeStyle = "green";
-    ctx.lineWidth = 2;
-    regions.forEach((region) => {
-      ctx.strokeRect(region.x, region.y, region.width, region.height);
-    });
-
     setProcessedImage(canvas.toDataURL());
   };
 
   const translateText = async () => {
-    if (!ocrWorker || detectedRegions.length === 0) return;
+    if (!selectedImage) return;
 
     setIsProcessing(true);
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
 
     try {
-      for (const region of detectedRegions) {
-        // Try both vertical and horizontal recognition
-        const result = await ocrWorker.recognize(region.canvas.toDataURL(), {
-          tessedit_pageseg_mode: "5", // Assume vertical text
-        });
-        let detectedText = result.data.text.trim();
+      const regions = await detectAndTranslateText(selectedImage);
+      setDetectedRegions(regions);
 
-        // If no text detected, try horizontal
-        if (!detectedText) {
-          const horizontalResult = await ocrWorker.recognize(
-            region.canvas.toDataURL(),
-            {
-              tessedit_pageseg_mode: "3", // Assume horizontal text
-            }
-          );
-          detectedText = horizontalResult.data.text.trim();
-        }
+      // Draw the original image
+      const img = new Image();
+      img.onload = () => {
+        ctx.drawImage(img, 0, 0);
 
-        if (detectedText) {
-          const translatedText = await mockTranslate(detectedText);
-
+        // Draw translated text
+        regions.forEach((region) => {
           // Clear original region
           ctx.fillStyle = "white";
           ctx.fillRect(region.x, region.y, region.width, region.height);
@@ -245,7 +133,7 @@ const MangaTranslator = () => {
           ctx.textBaseline = "middle";
 
           // Word wrap and draw text
-          const words = translatedText.split(" ");
+          const words = region.translatedText.split(" ");
           let line = "";
           let y = region.y + region.height / 2;
           const maxWidth = region.width * 0.9;
@@ -263,33 +151,16 @@ const MangaTranslator = () => {
             }
           });
           ctx.fillText(line, region.x + region.width / 2, y);
-        }
-      }
+        });
+
+        setProcessedImage(canvas.toDataURL());
+      };
+      img.src = selectedImage;
     } catch (error) {
       console.error("Error in translation:", error);
     } finally {
-      setProcessedImage(canvas.toDataURL());
       setIsProcessing(false);
     }
-  };
-
-  const mockTranslate = async (text) => {
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        const mockTranslations = {
-          こんにちは: "Hello",
-          さようなら: "Goodbye",
-          ありがとう: "Thank you",
-          おはよう: "Good morning",
-          かわいい: "Cute",
-          すごい: "Amazing",
-          よろしく: "Nice to meet you",
-          がんばって: "Good luck",
-          // Add more translations as needed
-        };
-        resolve(mockTranslations[text] || "[Translation not found]");
-      }, 500);
-    });
   };
 
   return (
@@ -314,6 +185,12 @@ const MangaTranslator = () => {
             Supports PNG, JPG up to 10MB
           </p>
         </div>
+
+        {error && (
+          <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-600">
+            {error}
+          </div>
+        )}
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {selectedImage && (
@@ -342,6 +219,31 @@ const MangaTranslator = () => {
             </div>
           )}
         </div>
+
+        {detectedRegions.length > 0 && (
+          <div className="mt-6 space-y-4">
+            <h3 className="font-medium">Detected Text and Translations</h3>
+            <div className="space-y-2">
+              {detectedRegions.map((region, index) => (
+                <div
+                  key={index}
+                  className="p-4 bg-gray-50 rounded-lg grid grid-cols-2 gap-4"
+                >
+                  <div>
+                    <p className="text-sm text-gray-600">Japanese Text:</p>
+                    <p className="font-medium">{region.text}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-600">
+                      English Translation:
+                    </p>
+                    <p className="font-medium">{region.translatedText}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         <canvas ref={canvasRef} style={{ display: "none" }} />
 

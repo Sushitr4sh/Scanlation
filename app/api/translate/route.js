@@ -1,22 +1,34 @@
-import { NextResponse } from "next/server";
-import { Translate } from "@google-cloud/translate/build/src/v2";
+import { v2 } from "@google-cloud/translate";
+const { Translate } = v2;
 
-export async function POST(request) {
+export async function POST(req) {
   try {
-    const { text } = await request.json();
+    const { text, targetLanguage, sourceLanguage } = await req.json();
 
+    // Creates a client with credentials
     const translate = new Translate({
-      projectId: "",
-      keyFilename: "",
+      keyFilename:
+        "C:/Users/Mario Imanuel/Downloads/astute-catcher-439016-d5-806566661c6c.json",
     });
 
+    // Translates the text
     const [translation] = await translate.translate(text, {
-      from: "ja",
-      to: "en",
+      from: sourceLanguage,
+      to: targetLanguage,
     });
 
-    return NextResponse.json({ translation });
+    return Response.json({ translatedText: translation });
   } catch (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    console.error("Error in translation:", error);
+    return Response.json(
+      {
+        error: error.message,
+        details:
+          process.env.NODE_ENV === "development" ? error.stack : undefined,
+      },
+      {
+        status: 500,
+      }
+    );
   }
 }
